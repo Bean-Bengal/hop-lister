@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hop Lister</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:760px;margin:0 auto;padding:12px;box-sizing:border-box;background:#f6f3ea;color:#222}
+textarea{width:100%;box-sizing:border-box;min-height:170px;font-family:monospace;font-size:13px}
+textarea.short{min-height:70px}
+input[type=text]{width:100%;box-sizing:border-box;font-size:16px;min-height:40px}
+button{min-height:44px;padding:0 16px;font-size:16px;margin:6px 6px 6px 0}
+button:active{transform:scale(.97)}
+.hop{background:#fff;border-left:6px solid #3a7;margin:8px 0;padding:8px;border-radius:6px;overflow-wrap:anywhere}
+.hop b{color:#175}
+.raw{font-family:monospace;font-size:12px;color:#555}
+#banner,#gl,#av{padding:6px;border-radius:6px;font-weight:bold;margin:6px 0;overflow-wrap:anywhere}
+.ok{background:#cfc}.bad{background:#fcc}.warn{background:#ffe9a8}
+#map{display:flex;flex-direction:column-reverse;gap:6px;margin:8px 0}
+.node{padding:8px;border-radius:6px;border-left:8px solid #e90;background:#ffe4b8;overflow-wrap:anywhere}
+.node.trusted{border-color:#2a6;background:#c9f0d6}
+.node small{display:block;color:#444}
+.cap{font-size:13px;color:#555}
+.vd{background:#fff;margin:6px 0;padding:8px;border-radius:6px;border-left:6px solid #999;overflow-wrap:anywhere}
+.vd.pass{border-color:#2a6}.vd.fail{border-color:#c33}.vd.warn{border-color:#e90}
+</style></head><body>
+<h1>Hop Lister</h1>
+<p>Paste raw email headers. Each Received hop is listed in the order the mail travelled (oldest first).</p>
+<div id="banner">tests running</div>
+<textarea id="in" placeholder="Received: from ..."></textarea>
+<label>Trusted domains (comma separated)<input type="text" id="trust" value="example.org"></label>
+<div><button id="go">List hops</button><button id="demo">Load example</button><button id="real">Load hoax-shaped example</button><button id="glue">Check gluing on this text</button></div>
+<div id="gl"></div>
+<h2>Hop map</h2>
+<div class="cap">Sender at the bottom, your inbox at the top. Green = server is in your trusted list.</div>
+<div id="map"></div>
+<div id="out"></div>
+<h2>Explain a verdict line</h2>
+<div class="cap">Paste an Authentication-Results line (or just the spf=, dkim=, dmarc= part).</div>
+<textarea id="auth" class="short" placeholder="Authentication-Results: mx.example.org; spf=pass ...; dkim=pass ...; dmarc=pass ..."></textarea>
+<div><button id="explain">Explain it</button><button id="authgood">Good example</button><button id="authbad">Dodgy example</button></div>
+<div id="av"></div>
+<div id="vout"></div>
+<script>
+function unfold(raw, joinFolded){
+  var lines=raw.split(/\r?\n/), out=[];
+  for(var i=0;i<lines.length;i++){
+    var l=lines[i];
+    if(joinFolded!==false && /^[ \t]/.test(l) && out.length){out[out.length-1]+=" "+l.trim();}
+    else out.push(l);
+  }
+  return out;
+}
+function findIPs(s){
+  var m=s.match(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g)||[];
+  var v6=s.match(/\[(?:IPv6:)?([0-9a-fA-F:]{6,})\]/g)||[];
+  var r=[];
+  m.forEach(function(x){if(x.split(".").every(function(n){return +n<=255}))r.push(x)});
+  v6.forEach(function(x){r.push(x.replace(/[\[\]]|IPv6:/g,""))});
+  return r;
+}
+function parseHops(raw, joinFolded){
+  var hops=[];
+  unfold(raw,joinFolded).forEach(function(l){
+    var m=/^Received:\s*(.*)$/i.exec(l);
+    if(!m)return;
+    var body=m[1], semi=body.lastIndexOf(";");
+    var time=semi>=0?body.slice(semi+1).trim():"";
+    var rest=semi>=0?body.slice(0,semi):body;
+    var f=/\bfrom\s+(\S+)/i.exec(rest), b=/\bby\s+(\S+)/i.exec(rest);
+    hops.push({from:f?f[1]:"?",by:b?b[1]:"?",ips:findIPs(rest),time:time,ts:Date.parse(time.replace(/\s*\(.*\)\s*$/,"")),raw:l});
+  });
+  return hops.reverse();
+}
+function damaged(hops){
+  return hops.filter(function(h){return h.by==="?"||isNaN(h.ts)}).length;
+}
+function gluingReport(raw){
+  var g=parseHops(raw,true), u=parseHops(raw,false);
+  var ordered=true;
+  for(var i=1;i<g.length;i++){if(!isNaN(g[i].ts)&&!isNaN(g[i-1].ts)&&g[i].ts<g[i-1].ts)ordered=false}
+  return {hops:g.length,damagedGlued:damaged(g),damagedUnglued:damaged(u),ordered:ordered,
+    holds:g.length>0&&damaged(g)===0&&ordered&&damaged(u)>0};
+}
+// trust rule: the hop's "by" host is a trusted domain or a subdomain of one
+function isTrusted(host, list){
+  host=String(host).toLowerCase().replace(/[<>\[\]]/g,"");
+  for(var i=0;i<list.length;i++){
+    var d=list[i].trim().toLowerCase();
+    if(!d)continue;
+    if(host===d||(host.length>d.length&&host.slice(host.length-d.length-1)==="."+d))return true;
+  }
+  return false;
+}
+// broken copy: plain substring match, lets lookalikes through
+function isTrustedBroken(host, list){
+  host=String(host).toLowerCase();
+  return list.some(function(d){return d.trim()&&host.indexOf(d.trim().toLowerCase())>=0});
+}
+// verdict explainer: pull spf/dkim/dmarc results (first of each)
+function parseVerdicts(text){
+  var r={},re=/\b(spf|dkim|dmarc)\s*=\s*([a-z]+)/gi,m;
+  while((m=re.exec(text))){var k=m[1].toLowerCase();if(!(k in r))r[k]=m[2].toLowerCase()}
+  return r;
+}
+var WORDS={
+  spf:{what:"SPF: is the sending server allowed to send for this domain?",
+    pass:"Yes, the server is on the domain's approved list.",
+    fail:"No. The server is not on the approved list, so it may be pretending.",
+    softfail:"Probably not. The domain says it shouldn't be sending but doesn't insist.",
+    neutral:"The domain doesn't say either way.",none:"The domain publishes no SPF list, so nothing to check."},
+  dkim:{what:"DKIM: does the message carry a valid signature that nobody has changed?",
+    pass:"Yes, the signature checks out and the message wasn't altered.",
+    fail:"The signature is wrong. It was altered on the way or it's forged.",
+    none:"The message isn't signed."},
+  dmarc:{what:"DMARC: do SPF or DKIM line up with the From address you see?",
+    pass:"Yes, the visible sender matches what was checked.",
+    fail:"No. The From address you see isn't backed by the checks, a classic fake sign.",
+    none:"The domain has no DMARC policy."}
+};
+function explainOne(k,v){
+  var w=WORDS[k];
+  return w?(w[v]||("Result '"+v+"' (not a common one, look it up).")):"";
+}
+function levelOf(v){
+  if(v==="pass")return "pass";
+  if(v==="fail"||v==="permerror")return "fail";
+  return "warn";
+}
+// overall call: bad if anything failed, warn if anything not a clean pass or missing, ok otherwise
+function overall(r){
+  var keys=Object.keys(r);
+  if(!keys.length)return "none";
+  var warn=false;
+  for(var i=0;i<keys.length;i++){var l=levelOf(r[keys[i]]);if(l==="fail")return "bad";if(l==="warn")warn=true}
+  if(!("dmarc" in r))warn=true;
+  return warn?"warn":"ok";
+}
+// broken copy: treats anything except fail as fine
+function overallBroken(r){
+  var keys=Object.keys(r);
+  if(!keys.length)return "none";
+  for(var i=0;i<keys.length;i++){if(r[keys[i]]==="fail")return "bad"}
+  return "ok";
+}
+var AUTH_GOOD="Authentication-Results: mx.bean.example; spf=pass smtp.mailfrom=example.org; dkim=pass header.d=example.org; dmarc=pass header.from=example.org";
+var AUTH_BAD="Authentication-Results: mx.bean.example; spf=softfail smtp.mailfrom=example.it; dkim=none; dmarc=fail header.from=example.it";
+var CALLS={ok:"Looks genuine: everything that was checked passed.",warn:"Be careful: something wasn't a clean pass, or DMARC is missing.",bad:"Looks fake or tampered with: at least one check failed.",none:"No spf, dkim or dmarc results found in that text."};
+function showVerdict(){
+  var r=parseVerdicts(document.getElementById("auth").value), c=overall(r);
+  var a=document.getElementById("av");
+  a.className=c==="ok"?"ok":c==="bad"?"bad":c==="warn"?"warn":"bad";
+  a.textContent=CALLS[c];
+  document.getElementById("vout").innerHTML=["spf","dkim","dmarc"].map(function(k){
+    if(!(k in r))return '<div class="vd warn"><b>'+k.toUpperCase()+'</b>: not in the line.<br>'+esc(WORDS[k].what)+'</div>';
+    return '<div class="vd '+levelOf(r[k])+'"><b>'+k.toUpperCase()+' = '+esc(r[k])+'</b><br>'+esc(WORDS[k].what)+'<br>'+esc(explainOne(k,r[k]))+'</div>';
+  }).join("");
+}
+function trustList(){return document.getElementById("trust").value.split(",")}
+var DEMO="Received: from mail.dest.example (mail.dest.example [203.0.113.9])\n\tby mx.bean.example with ESMTP; Tue, 3 Jun 2025 10:02:15 +0200\nReceived: from relay.it.example (relay.it.example [198.51.100.24])\n  by mail.dest.example with SMTP;\n  Tue, 3 Jun 2025 10:02:12 +0200\nReceived: from [10.0.0.5] (unknown [192.0.2.77])\n by relay.it.example with ESMTPSA; Tue, 3 Jun 2025 09:59:40 +0200\nSubject: Hello\nFrom: someone@example.com";
+var HOAX="Received: from mx.example.net (mx.example.net [203.0.113.50])\n\tby mailin.example.org (Postfix) with ESMTPS id 4ABC123\n\tfor <bean@example.org>; Wed, 4 Jun 2025 08:15:33 +0200 (CEST)\nReceived: from smtp.posta.example.it (smtp.posta.example.it [198.51.100.80])\n\tby mx.example.net with ESMTP id xyz;\n\tWed, 4 Jun 2025 08:15:30 +0200\nReceived: from [192.168.1.20] (host-12-34.example.it [192.0.2.140])\n\tby smtp.posta.example.it with ESMTPA;\n\tWed, 4 Jun 2025 08:15:21 +0200\nSubject: URGENTE: hai vinto\nFrom: premio@example.it";
+function esc(s){return String(s).replace(/[&<>]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;"}[c]})}
+function renderMap(hops){
+  var list=trustList();
+  document.getElementById("map").innerHTML=hops.map(function(h,i){
+    var t=isTrusted(h.by,list);
+    return '<div class="node'+(t?' trusted':'')+'"><b>Hop '+(i+1)+(t?' (trusted)':' (not trusted)')+'</b> '+esc(h.by)+'<small>from '+esc(h.from)+' · '+esc(h.ips.join(", ")||"no IP")+'</small></div>';
+  }).join("");
+}
+function render(){
+  var hops=parseHops(document.getElementById("in").value);
+  var o=document.getElementById("out");
+  renderMap(hops);
+  if(!hops.length){o.innerHTML="<p>No Received lines found.</p>";return}
+  o.innerHTML=hops.map(function(h,i){
+    var gap="";
+    if(i>0&&!isNaN(h.ts)&&!isNaN(hops[i-1].ts))gap=" (+"+Math.round((h.ts-hops[i-1].ts)/1000)+"s)";
+    return '<div class="hop"><b>Hop '+(i+1)+'</b> '+esc(h.from)+' → '+esc(h.by)+'<br>IP: '+(h.ips.map(esc).join(", ")||"none found")+'<br>Time: '+esc(h.time||"none")+gap+'<div class="raw">'+esc(h.raw)+'</div></div>';
+  }).join("");
+}
+function showGlue(){
+  var r=gluingReport(document.getElementById("in").value), g=document.getElementById("gl");
+  if(!r.hops){g.className="bad";g.textContent="No Received lines to check.";return}
+  g.className=r.holds?"ok":"bad";
+  g.textContent=(r.holds?"Gluing holds: ":"Check this: ")+r.hops+" hops, "+r.damagedGlued+" damaged when glued, "+r.damagedUnglued+" damaged if not glued, times "+(r.ordered?"in order":"OUT OF ORDER")+(r.damagedUnglued===0?" (no folded lines here, so nothing to prove)":"");
+}
+document.getElementById("go").onclick=render;
+document.getElementById("trust").oninput=render;
+document.getElementById("glue").onclick=function(){render();showGlue()};
+document.getElementById("demo").onclick=function(){document.getElementById("in").value=DEMO;render()};
+document.getElementById("real").onclick=function(){document.getElementById("in").value=HOAX;render();showGlue()};
+document.getElementById("explain").onclick=showVerdict;
+document.getElementById("authgood").onclick=function(){document.getElementById("auth").value=AUTH_GOOD;showVerdict()};
+document.getElementById("authbad").onclick=function(){document.getElementById("auth").value=AUTH_BAD;showVerdict()};
+(function(){
+  var b=document.getElementById("banner");
+  try{
+    var h=parseHops(DEMO), bad=parseHops(DEMO,false), fails=[];
+    function t(c,n){if(!c)fails.push(n)}
+    t(h.length===3,"three hops");
+    t(h[0].by==="relay.it.example","oldest first");
+    t(h[0].ips.indexOf("192.0.2.77")>=0,"sender ip");
+    t(h[1].time==="Tue, 3 Jun 2025 10:02:12 +0200","folded time");
+    t(h[2].ips.indexOf("203.0.113.9")>=0,"last ip");
+    t(findIPs("[999.1.1.1]").length===0,"bad ip rejected");
+    var brokenCaught=bad.length!==3||bad[1].time===""||bad[1].ips.length!==h[1].ips.length;
+    t(brokenCaught,"broken copy must fail");
+    var hx=parseHops(HOAX), rep=gluingReport(HOAX);
+    t(hx.length===3,"hoax: three hops");
+    t(hx[0].by==="smtp.posta.example.it","hoax: oldest by");
+    t(hx[0].ips.indexOf("192.0.2.140")>=0,"hoax: sender ip");
+    t(hx[2].time.indexOf("08:15:33")>=0,"hoax: for-line fold keeps time");
+    t(hx[2].by==="mailin.example.org","hoax: last by");
+    t(rep.damagedGlued===0,"hoax: nothing damaged glued");
+    t(rep.damagedUnglued>0,"hoax: unglued copy is damaged");
+    t(rep.ordered,"hoax: times in order");
+    t(rep.holds,"hoax: gluing holds");
+    t(gluingReport("Received: from a by b; garbage").holds===false,"report can fail");
+    var L=["example.org"];
+    t(isTrusted("example.org",L),"trust: exact");
+    t(isTrusted("mailin.example.org",L),"trust: subdomain");
+    t(!isTrusted("notexample.org",L),"trust: lookalike rejected");
+    t(!isTrusted("example.org.evil.com",L),"trust: suffix trick rejected");
+    t(!isTrusted("mailin.example.org",[]),"trust: empty list");
+    t(!isTrusted("mailin.example.org",[" "]),"trust: blank entry");
+    t(isTrusted("MAILIN.Example.ORG",["Example.org"]),"trust: case");
+    t(isTrustedBroken("notexample.org",L)&&!isTrusted("notexample.org",L),"trust: broken copy must fail");
+    document.getElementById("in").value=HOAX;render();
+    var nodes=document.querySelectorAll("#map .node");
+    t(nodes.length===3,"map: three nodes");
+    t(nodes[0].className.indexOf("trusted")<0,"map: sender hop not trusted");
+    t(nodes[2].className.indexOf("trusted")>=0,"map: inbox hop trusted");
+    t(getComputedStyle(document.getElementById("map")).flexDirection==="column-reverse","map: bottom to top");
+    document.getElementById("in").value="";render();
+    // verdict explainer
+    var g=parseVerdicts(AUTH_GOOD), d=parseVerdicts(AUTH_BAD);
+    t(g.spf==="pass"&&g.dkim==="pass"&&g.dmarc==="pass","verdict: parse good");
+    t(d.spf==="softfail"&&d.dkim==="none"&&d.dmarc==="fail","verdict: parse dodgy");
+    t(parseVerdicts("SPF=Pass; DKIM=PASS")["dkim"]==="pass","verdict: case");
+    t(overall(g)==="ok","verdict: all pass is ok");
+    t(overall(d)==="bad","verdict: dmarc fail is bad");
+    t(overall({spf:"pass",dkim:"pass",dmarc:"pass"})==="ok","verdict: neighbour of softfail passes");
+    t(overall({spf:"softfail",dkim:"pass",dmarc:"pass"})==="warn","verdict: softfail warns");
+    t(overall({spf:"pass",dkim:"pass"})==="warn","verdict: missing dmarc warns");
+    t(overall({})==="none","verdict: empty is none");
+    t(overall({spf:"fail",dmarc:"pass"})==="bad","verdict: one fail beats passes");
+    t(overallBroken({spf:"softfail",dkim:"pass",dmarc:"pass"})!==overall({spf:"softfail",dkim:"pass",dmarc:"pass"}),"verdict: broken copy must fail");
+    t(explainOne("spf","softfail").length>10&&explainOne("dkim","weird").indexOf("not a common")>0,"verdict: wording");
+    if(fails.length){b.className="bad";b.textContent="FAIL: "+fails.join(", ")}
+    else{b.className="ok";b.textContent="All checks pass: parsing, hoax-shaped headers, trust rule, map order and colours, verdict explainer (softfail and broken copy checked)"}
+  }catch(e){b.className="bad";b.textContent="Error: "+e.message}
+})();
+</script></body></html>
