@@ -7,11 +7,12 @@ textarea{width:100%;box-sizing:border-box;min-height:170px;font-family:monospace
 textarea.short{min-height:70px}
 input[type=text]{width:100%;box-sizing:border-box;font-size:16px;min-height:40px}
 button{min-height:44px;padding:0 16px;font-size:16px;margin:6px 6px 6px 0}
-button:active{transform:scale(.97)}
+button:active{transform:scale(.97);background:#ddd}
+button.on{background:#cde;font-weight:bold;border:2px solid #36a}
 .hop{background:#fff;border-left:6px solid #3a7;margin:8px 0;padding:8px;border-radius:6px;overflow-wrap:anywhere}
 .hop b{color:#175}
 .raw{font-family:monospace;font-size:12px;color:#555}
-#banner,#gl,#av{padding:6px;border-radius:6px;font-weight:bold;margin:6px 0;overflow-wrap:anywhere}
+#banner,#gl,#av,#ov,#pv{padding:6px;border-radius:6px;font-weight:bold;margin:6px 0;overflow-wrap:anywhere}
 .ok{background:#cfc}.bad{background:#fcc}.warn{background:#ffe9a8}
 #map{display:flex;flex-direction:column-reverse;gap:6px;margin:8px 0}
 .node{padding:8px;border-radius:6px;border-left:8px solid #e90;background:#ffe4b8;overflow-wrap:anywhere}
@@ -20,13 +21,17 @@ button:active{transform:scale(.97)}
 .cap{font-size:13px;color:#555}
 .vd{background:#fff;margin:6px 0;padding:8px;border-radius:6px;border-left:6px solid #999;overflow-wrap:anywhere}
 .vd.pass{border-color:#2a6}.vd.fail{border-color:#c33}.vd.warn{border-color:#e90}
+@media (max-width:520px){.btns button{display:block;width:100%;margin:6px 0}h1{font-size:24px}}
 </style></head><body>
 <h1>Hop Lister</h1>
-<p>Paste raw email headers. Each Received hop is listed in the order the mail travelled (oldest first).</p>
+<p>Paste raw email headers. Each Received hop is listed in the order the mail travelled (oldest first, or flip it).</p>
 <div id="banner">tests running</div>
+<div id="ov"></div>
+<div id="pv">phone check running</div>
 <textarea id="in" placeholder="Received: from ..."></textarea>
 <label>Trusted domains (comma separated)<input type="text" id="trust" value="example.org"></label>
-<div><button id="go">List hops</button><button id="demo">Load example</button><button id="real">Load hoax-shaped example</button><button id="glue">Check gluing on this text</button></div>
+<div class="btns"><button id="go">List hops</button><button id="demo">Load example</button><button id="real">Load hoax-shaped example</button><button id="glue">Check gluing on this text</button></div>
+<div class="btns"><button id="sortOld" class="on" aria-pressed="true">Oldest first</button><button id="sortNew" aria-pressed="false">Newest first</button></div>
 <div id="gl"></div>
 <h2>Hop map</h2>
 <div class="cap">Sender at the bottom, your inbox at the top. Green = server is in your trusted list.</div>
@@ -35,7 +40,7 @@ button:active{transform:scale(.97)}
 <h2>Explain a verdict line</h2>
 <div class="cap">Paste an Authentication-Results line (or just the spf=, dkim=, dmarc= part).</div>
 <textarea id="auth" class="short" placeholder="Authentication-Results: mx.example.org; spf=pass ...; dkim=pass ...; dmarc=pass ..."></textarea>
-<div><button id="explain">Explain it</button><button id="authgood">Good example</button><button id="authbad">Dodgy example</button></div>
+<div class="btns"><button id="explain">Explain it</button><button id="authgood">Good example</button><button id="authbad">Dodgy example</button></div>
 <div id="av"></div>
 <div id="vout"></div>
 <script>
@@ -79,7 +84,6 @@ function gluingReport(raw){
   return {hops:g.length,damagedGlued:damaged(g),damagedUnglued:damaged(u),ordered:ordered,
     holds:g.length>0&&damaged(g)===0&&ordered&&damaged(u)>0};
 }
-// trust rule: the hop's "by" host is a trusted domain or a subdomain of one
 function isTrusted(host, list){
   host=String(host).toLowerCase().replace(/[<>\[\]]/g,"");
   for(var i=0;i<list.length;i++){
@@ -89,12 +93,32 @@ function isTrusted(host, list){
   }
   return false;
 }
-// broken copy: plain substring match, lets lookalikes through
 function isTrustedBroken(host, list){
   host=String(host).toLowerCase();
   return list.some(function(d){return d.trim()&&host.indexOf(d.trim().toLowerCase())>=0});
 }
-// verdict explainer: pull spf/dkim/dmarc results (first of each)
+// sort rule: oldest first by timestamp (stable; untimed hops after timed ones); newest reverses
+function sortHops(hops, newestFirst){
+  var a=hops.map(function(h,i){return {h:h,i:i}});
+  a.sort(function(x,y){
+    var nx=isNaN(x.h.ts),ny=isNaN(y.h.ts);
+    if(nx&&ny)return x.i-y.i;
+    if(nx)return 1;
+    if(ny)return -1;
+    return x.h.ts-y.h.ts||x.i-y.i;
+  });
+  var r=a.map(function(o){return o.h});
+  return newestFirst?r.reverse():r;
+}
+function sortHopsBroken(hops, newestFirst){return hops.slice()}
+var newestFirst=false;
+// phone verdict: pure function of measured numbers
+function phoneVerdict(scrollW, screenW, minBtnH){
+  if(scrollW>screenW)return "wide";
+  if(minBtnH<44)return "small";
+  return "ok";
+}
+function phoneVerdictBroken(scrollW, screenW, minBtnH){return "ok"}
 function parseVerdicts(text){
   var r={},re=/\b(spf|dkim|dmarc)\s*=\s*([a-z]+)/gi,m;
   while((m=re.exec(text))){var k=m[1].toLowerCase();if(!(k in r))r[k]=m[2].toLowerCase()}
@@ -124,7 +148,6 @@ function levelOf(v){
   if(v==="fail"||v==="permerror")return "fail";
   return "warn";
 }
-// overall call: bad if anything failed, warn if anything not a clean pass or missing, ok otherwise
 function overall(r){
   var keys=Object.keys(r);
   if(!keys.length)return "none";
@@ -133,7 +156,6 @@ function overall(r){
   if(!("dmarc" in r))warn=true;
   return warn?"warn":"ok";
 }
-// broken copy: treats anything except fail as fine
 function overallBroken(r){
   var keys=Object.keys(r);
   if(!keys.length)return "none";
@@ -169,11 +191,20 @@ function render(){
   var o=document.getElementById("out");
   renderMap(hops);
   if(!hops.length){o.innerHTML="<p>No Received lines found.</p>";return}
-  o.innerHTML=hops.map(function(h,i){
+  var shown=sortHops(hops,newestFirst);
+  o.innerHTML=shown.map(function(h){
+    var i=hops.indexOf(h);
     var gap="";
     if(i>0&&!isNaN(h.ts)&&!isNaN(hops[i-1].ts))gap=" (+"+Math.round((h.ts-hops[i-1].ts)/1000)+"s)";
     return '<div class="hop"><b>Hop '+(i+1)+'</b> '+esc(h.from)+' → '+esc(h.by)+'<br>IP: '+(h.ips.map(esc).join(", ")||"none found")+'<br>Time: '+esc(h.time||"none")+gap+'<div class="raw">'+esc(h.raw)+'</div></div>';
   }).join("");
+}
+function setOrder(nf){
+  newestFirst=nf;
+  var a=document.getElementById("sortOld"), b=document.getElementById("sortNew");
+  a.className=nf?"":"on";b.className=nf?"on":"";
+  a.setAttribute("aria-pressed",nf?"false":"true");b.setAttribute("aria-pressed",nf?"true":"false");
+  render();
 }
 function showGlue(){
   var r=gluingReport(document.getElementById("in").value), g=document.getElementById("gl");
@@ -181,7 +212,44 @@ function showGlue(){
   g.className=r.holds?"ok":"bad";
   g.textContent=(r.holds?"Gluing holds: ":"Check this: ")+r.hops+" hops, "+r.damagedGlued+" damaged when glued, "+r.damagedUnglued+" damaged if not glued, times "+(r.ordered?"in order":"OUT OF ORDER")+(r.damagedUnglued===0?" (no folded lines here, so nothing to prove)":"");
 }
+function minButtonHeight(doc){
+  var bs=doc.querySelectorAll("button"), m=9999;
+  for(var i=0;i<bs.length;i++){var h=bs[i].getBoundingClientRect().height;if(h<m)m=h}
+  return m;
+}
+function checkOverflow(){
+  var o=document.getElementById("ov"), sw=document.documentElement.scrollWidth, iw=window.innerWidth;
+  var fits=sw<=iw;
+  o.className=fits?"ok":"bad";
+  o.textContent=(fits?"Fits this window: ":"Too wide here: ")+sw+"px page, "+iw+"px window";
+}
+// real phone-width check: hidden 360px copy of this page; skipped inside the copy itself
+function phoneCheck(){
+  var p=document.getElementById("pv");
+  if(window.parent!==window){p.style.display="none";return}
+  try{
+    var f=document.createElement("iframe");
+    f.style.cssText="position:absolute;left:0;top:0;width:360px;height:700px;border:0;visibility:hidden;pointer-events:none";
+    f.setAttribute("aria-hidden","true");f.tabIndex=-1;
+    f.onload=function(){
+      window.setTimeout(function(){
+        try{
+          var d=f.contentDocument, sw=d.documentElement.scrollWidth, bh=minButtonHeight(d);
+          var v=phoneVerdict(sw,360,bh);
+          var catches=phoneVerdictBroken(sw+50,360,10)==="ok"&&phoneVerdict(sw+50,360,10)!=="ok"&&phoneVerdict(360,360,44)==="ok"&&phoneVerdict(361,360,44)==="wide"&&phoneVerdict(360,360,43)==="small";
+          p.className=(v==="ok"&&catches)?"ok":"bad";
+          p.textContent=(v==="ok"?"Phone check (360px wide): no sideways scroll, buttons "+Math.round(bh)+"px tall":"Phone check FAILED at 360px: "+v+" ("+sw+"px page, smallest button "+Math.round(bh)+"px)")+(catches?"":" (checker itself broken)");
+        }catch(e){p.className="bad";p.textContent="Phone check error: "+e.message}
+        if(f.parentNode)f.parentNode.removeChild(f);
+      },300);
+    };
+    f.srcdoc="<!DOCTYPE html>"+document.documentElement.outerHTML;
+    document.body.appendChild(f);
+  }catch(e){p.className="bad";p.textContent="Phone check error: "+e.message}
+}
 document.getElementById("go").onclick=render;
+document.getElementById("sortOld").onclick=function(){setOrder(false)};
+document.getElementById("sortNew").onclick=function(){setOrder(true)};
 document.getElementById("trust").oninput=render;
 document.getElementById("glue").onclick=function(){render();showGlue()};
 document.getElementById("demo").onclick=function(){document.getElementById("in").value=DEMO;render()};
@@ -189,6 +257,7 @@ document.getElementById("real").onclick=function(){document.getElementById("in")
 document.getElementById("explain").onclick=showVerdict;
 document.getElementById("authgood").onclick=function(){document.getElementById("auth").value=AUTH_GOOD;showVerdict()};
 document.getElementById("authbad").onclick=function(){document.getElementById("auth").value=AUTH_BAD;showVerdict()};
+window.addEventListener("resize",checkOverflow);
 (function(){
   var b=document.getElementById("banner");
   try{
@@ -222,14 +291,35 @@ document.getElementById("authbad").onclick=function(){document.getElementById("a
     t(!isTrusted("mailin.example.org",[" "]),"trust: blank entry");
     t(isTrusted("MAILIN.Example.ORG",["Example.org"]),"trust: case");
     t(isTrustedBroken("notexample.org",L)&&!isTrusted("notexample.org",L),"trust: broken copy must fail");
+    var sh=[{ts:300,n:"c"},{ts:100,n:"a"},{ts:NaN,n:"x"},{ts:200,n:"b"},{ts:100,n:"a2"}];
+    var so=sortHops(sh,false).map(function(o){return o.n}).join(",");
+    var sn=sortHops(sh,true).map(function(o){return o.n}).join(",");
+    t(so==="a,a2,b,c,x","sort: oldest first, tie stable, untimed last");
+    t(sn==="x,c,b,a2,a","sort: newest first is the exact reverse");
+    t(sortHops([],true).length===0,"sort: empty");
+    t(sortHops([sh[0]],false).length===1,"sort: single");
+    t(sh[0].n==="c","sort: input not changed");
+    t(sortHopsBroken(sh,false).map(function(o){return o.n}).join(",")!==so,"sort: broken copy must fail");
+    t(sortHopsBroken(sh,true).map(function(o){return o.n}).join(",")!==sn,"sort: broken copy must fail newest");
+    t(phoneVerdict(360,360,44)==="ok","phone: exact fit and 44px passes");
+    t(phoneVerdict(361,360,44)==="wide","phone: one px too wide fails");
+    t(phoneVerdict(360,360,43)==="small","phone: 43px button fails");
+    t(phoneVerdictBroken(500,360,10)==="ok"&&phoneVerdict(500,360,10)!=="ok","phone: broken copy must fail");
     document.getElementById("in").value=HOAX;render();
     var nodes=document.querySelectorAll("#map .node");
     t(nodes.length===3,"map: three nodes");
     t(nodes[0].className.indexOf("trusted")<0,"map: sender hop not trusted");
     t(nodes[2].className.indexOf("trusted")>=0,"map: inbox hop trusted");
     t(getComputedStyle(document.getElementById("map")).flexDirection==="column-reverse","map: bottom to top");
+    var first=function(){return document.querySelector("#out .hop b").textContent};
+    t(first()==="Hop 1","sort: starts oldest first");
+    document.getElementById("sortNew").click();
+    t(first()==="Hop 3","sort button: newest first shows hop 3 on top");
+    t(document.getElementById("sortNew").getAttribute("aria-pressed")==="true","sort button: newest pressed");
+    document.getElementById("sortOld").click();
+    t(first()==="Hop 1","sort button: oldest first again");
+    t(document.getElementById("sortOld").getAttribute("aria-pressed")==="true","sort button: oldest pressed");
     document.getElementById("in").value="";render();
-    // verdict explainer
     var g=parseVerdicts(AUTH_GOOD), d=parseVerdicts(AUTH_BAD);
     t(g.spf==="pass"&&g.dkim==="pass"&&g.dmarc==="pass","verdict: parse good");
     t(d.spf==="softfail"&&d.dkim==="none"&&d.dmarc==="fail","verdict: parse dodgy");
@@ -244,7 +334,11 @@ document.getElementById("authbad").onclick=function(){document.getElementById("a
     t(overallBroken({spf:"softfail",dkim:"pass",dmarc:"pass"})!==overall({spf:"softfail",dkim:"pass",dmarc:"pass"}),"verdict: broken copy must fail");
     t(explainOne("spf","softfail").length>10&&explainOne("dkim","weird").indexOf("not a common")>0,"verdict: wording");
     if(fails.length){b.className="bad";b.textContent="FAIL: "+fails.join(", ")}
-    else{b.className="ok";b.textContent="All checks pass: parsing, hoax-shaped headers, trust rule, map order and colours, verdict explainer (softfail and broken copy checked)"}
+    else{b.className="ok";b.textContent="All checks pass: parsing, hoax-shaped headers, trust rule, map, sorting and phone rule (broken copies checked), verdict explainer"}
   }catch(e){b.className="bad";b.textContent="Error: "+e.message}
+  // leave the example showing so there is a list to see
+  document.getElementById("in").value=DEMO;render();
+  checkOverflow();
+  phoneCheck();
 })();
 </script></body></html>
