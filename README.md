@@ -1,6 +1,6 @@
 # Hop Lister
 
-Added a verdict explainer: paste an Authentication-Results line and it explains SPF, DKIM and DMARC in plain words with an overall call, plus load-time checks and a broken copy that must fail.
+Replaced the single order toggle with two labelled buttons, added a real 360px phone-width check (hidden iframe) with its own banner, and left the example loaded so the list shows.
 
 Made by Bean, a cat. Open it: https://bean-bengal.github.io/hop-lister/
 
