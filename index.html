@@ -12,7 +12,7 @@ button.on{background:#cde;font-weight:bold;border:2px solid #36a}
 .hop{background:#fff;border-left:6px solid #3a7;margin:8px 0;padding:8px;border-radius:6px;overflow-wrap:anywhere}
 .hop b{color:#175}
 .raw{font-family:monospace;font-size:12px;color:#555}
-#banner,#gl,#av,#ov,#pv{padding:6px;border-radius:6px;font-weight:bold;margin:6px 0;overflow-wrap:anywhere}
+#banner,#gl,#av,#ov,#pv,#ob{padding:6px;border-radius:6px;font-weight:bold;margin:6px 0;overflow-wrap:anywhere}
 .ok{background:#cfc}.bad{background:#fcc}.warn{background:#ffe9a8}
 #map{display:flex;flex-direction:column-reverse;gap:6px;margin:8px 0}
 .node{padding:8px;border-radius:6px;border-left:8px solid #e90;background:#ffe4b8;overflow-wrap:anywhere}
@@ -23,11 +23,13 @@ button.on{background:#cde;font-weight:bold;border:2px solid #36a}
 .vd.pass{border-color:#2a6}.vd.fail{border-color:#c33}.vd.warn{border-color:#e90}
 @media (max-width:520px){.btns button{display:block;width:100%;margin:6px 0}h1{font-size:24px}}
 </style></head><body>
+<script data-bean-store>(function(){if(typeof location!=='undefined'&&location&&location.protocol==='about:'&&typeof document!=='undefined'&&document.addEventListener){document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[href^="#"]');if(!a||a.target==='_blank')return;e.preventDefault();try{location.hash=a.getAttribute('href')}catch(x){}},true)}if(typeof window==='undefined')return;try{window.localStorage.getItem('x');return}catch(e){}var d=Object.assign({},window.__BEAN_SAVED||{});function post(){try{parent.postMessage({type:'bean-store',data:d},'*')}catch(e){}}var ls={getItem:function(k){return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null},setItem:function(k,v){d[k]=String(v);post()},removeItem:function(k){delete d[k];post()},clear:function(){d={};post()},key:function(i){return Object.keys(d)[i]||null}};Object.defineProperty(ls,'length',{get:function(){return Object.keys(d).length}});try{Object.defineProperty(window,'localStorage',{value:ls,configurable:true})}catch(e){}})();</script>
 <h1>Hop Lister</h1>
 <p>Paste raw email headers. Each Received hop is listed in the order the mail travelled (oldest first, or flip it).</p>
 <div id="banner">tests running</div>
 <div id="ov"></div>
 <div id="pv">phone check running</div>
+<div id="ob">order button check running</div>
 <textarea id="in" placeholder="Received: from ..."></textarea>
 <label>Trusted domains (comma separated)<input type="text" id="trust" value="example.org"></label>
 <div class="btns"><button id="go">List hops</button><button id="demo">Load example</button><button id="real">Load hoax-shaped example</button><button id="glue">Check gluing on this text</button></div>
@@ -119,6 +121,20 @@ function phoneVerdict(scrollW, screenW, minBtnH){
   return "ok";
 }
 function phoneVerdictBroken(scrollW, screenW, minBtnH){return "ok"}
+// order buttons: a and b are {left,right,height,pressed} or null; pure function
+function orderButtonsVerdict(a, b, screenW){
+  if(!a||!b)return "missing";
+  var xs=[a,b];
+  for(var i=0;i<2;i++){if(xs[i].left<0||xs[i].right>screenW)return "offscreen"}
+  for(var j=0;j<2;j++){if(xs[j].height<44)return "small"}
+  if(a.pressed===b.pressed)return "pressed";
+  return "ok";
+}
+// broken twin: only notices missing buttons
+function orderButtonsVerdictBroken(a, b, screenW){
+  if(!a||!b)return "missing";
+  return "ok";
+}
 function parseVerdicts(text){
   var r={},re=/\b(spf|dkim|dmarc)\s*=\s*([a-z]+)/gi,m;
   while((m=re.exec(text))){var k=m[1].toLowerCase();if(!(k in r))r[k]=m[2].toLowerCase()}
@@ -217,6 +233,12 @@ function minButtonHeight(doc){
   for(var i=0;i<bs.length;i++){var h=bs[i].getBoundingClientRect().height;if(h<m)m=h}
   return m;
 }
+function measureOrderButton(doc,id){
+  var e=doc.getElementById(id);
+  if(!e)return null;
+  var r=e.getBoundingClientRect();
+  return {left:r.left,right:r.right,height:r.height,pressed:e.getAttribute("aria-pressed")==="true"};
+}
 function checkOverflow(){
   var o=document.getElementById("ov"), sw=document.documentElement.scrollWidth, iw=window.innerWidth;
   var fits=sw<=iw;
@@ -225,8 +247,8 @@ function checkOverflow(){
 }
 // real phone-width check: hidden 360px copy of this page; skipped inside the copy itself
 function phoneCheck(){
-  var p=document.getElementById("pv");
-  if(window.parent!==window){p.style.display="none";return}
+  var p=document.getElementById("pv"), ob=document.getElementById("ob");
+  if(window.parent!==window){p.style.display="none";ob.style.display="none";return}
   try{
     var f=document.createElement("iframe");
     f.style.cssText="position:absolute;left:0;top:0;width:360px;height:700px;border:0;visibility:hidden;pointer-events:none";
@@ -240,6 +262,15 @@ function phoneCheck(){
           p.className=(v==="ok"&&catches)?"ok":"bad";
           p.textContent=(v==="ok"?"Phone check (360px wide): no sideways scroll, buttons "+Math.round(bh)+"px tall":"Phone check FAILED at 360px: "+v+" ("+sw+"px page, smallest button "+Math.round(bh)+"px)")+(catches?"":" (checker itself broken)");
         }catch(e){p.className="bad";p.textContent="Phone check error: "+e.message}
+        try{
+          var a=measureOrderButton(d,"sortOld"), b=measureOrderButton(d,"sortNew");
+          var ov=orderButtonsVerdict(a,b,360);
+          // the broken twin must say ok to a copy that is really broken
+          var bad={left:0,right:500,height:44,pressed:true}, good={left:0,right:340,height:44,pressed:false};
+          var caught=orderButtonsVerdictBroken(good,bad,360)==="ok"&&orderButtonsVerdict(good,bad,360)==="offscreen"&&orderButtonsVerdict(good,{left:0,right:340,height:44,pressed:true},360)==="ok";
+          ob.className=(ov==="ok"&&caught)?"ok":"bad";
+          ob.textContent=(ov==="ok"?"Order buttons at 360px: both on screen, "+Math.round(a.height)+"px tall, exactly one pressed":"Order buttons FAILED at 360px: "+ov)+(caught?"":" (checker itself broken)");
+        }catch(e){ob.className="bad";ob.textContent="Order button check error: "+e.message}
         if(f.parentNode)f.parentNode.removeChild(f);
       },300);
     };
@@ -305,6 +336,16 @@ window.addEventListener("resize",checkOverflow);
     t(phoneVerdict(361,360,44)==="wide","phone: one px too wide fails");
     t(phoneVerdict(360,360,43)==="small","phone: 43px button fails");
     t(phoneVerdictBroken(500,360,10)==="ok"&&phoneVerdict(500,360,10)!=="ok","phone: broken copy must fail");
+    var oa={left:0,right:340,height:44,pressed:true}, obt={left:0,right:340,height:44,pressed:false};
+    t(orderButtonsVerdict(oa,obt,360)==="ok","order: good pair passes");
+    t(orderButtonsVerdict(oa,null,360)==="missing","order: missing button fails");
+    t(orderButtonsVerdict(oa,{left:0,right:360,height:44,pressed:false},360)==="ok","order: right edge exactly 360 passes");
+    t(orderButtonsVerdict(oa,{left:0,right:361,height:44,pressed:false},360)==="offscreen","order: one px past the edge fails");
+    t(orderButtonsVerdict(oa,{left:-1,right:300,height:44,pressed:false},360)==="offscreen","order: hanging off the left fails");
+    t(orderButtonsVerdict(oa,{left:0,right:340,height:43,pressed:false},360)==="small","order: 43px tall fails");
+    t(orderButtonsVerdict(oa,{left:0,right:340,height:44,pressed:true},360)==="pressed","order: both pressed fails");
+    t(orderButtonsVerdict(obt,{left:0,right:340,height:44,pressed:false},360)==="pressed","order: neither pressed fails");
+    t(orderButtonsVerdictBroken(oa,{left:0,right:900,height:10,pressed:true},360)==="ok"&&orderButtonsVerdict(oa,{left:0,right:900,height:10,pressed:true},360)!=="ok","order: broken copy must fail");
     document.getElementById("in").value=HOAX;render();
     var nodes=document.querySelectorAll("#map .node");
     t(nodes.length===3,"map: three nodes");
@@ -334,7 +375,7 @@ window.addEventListener("resize",checkOverflow);
     t(overallBroken({spf:"softfail",dkim:"pass",dmarc:"pass"})!==overall({spf:"softfail",dkim:"pass",dmarc:"pass"}),"verdict: broken copy must fail");
     t(explainOne("spf","softfail").length>10&&explainOne("dkim","weird").indexOf("not a common")>0,"verdict: wording");
     if(fails.length){b.className="bad";b.textContent="FAIL: "+fails.join(", ")}
-    else{b.className="ok";b.textContent="All checks pass: parsing, hoax-shaped headers, trust rule, map, sorting and phone rule (broken copies checked), verdict explainer"}
+    else{b.className="ok";b.textContent="All checks pass: parsing, hoax-shaped headers, trust rule, map, sorting, phone rule and order button rule (broken copies checked), verdict explainer"}
   }catch(e){b.className="bad";b.textContent="Error: "+e.message}
   // leave the example showing so there is a list to see
   document.getElementById("in").value=DEMO;render();
